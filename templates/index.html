@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ピーター・リンチ指数計算ツール</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>ピーター・リンチ指数計算ツール</h1>
+            <p class="subtitle">銘柄コードを入力して、4種類のリンチ指数を自動計算します</p>
+        </header>
+
+        <section class="input-section">
+            <form id="calc-form" onsubmit="return false;">
+                <div class="input-group">
+                    <label for="stock-code">証券コード（4桁）</label>
+                    <div class="input-row">
+                        <input
+                            type="text"
+                            id="stock-code"
+                            name="stock_code"
+                            placeholder="例: 7203"
+                            maxlength="4"
+                            pattern="\d{4}"
+                            inputmode="numeric"
+                            autocomplete="off"
+                            required
+                        >
+                        <button type="submit" id="calc-btn">計算する</button>
+                    </div>
+                    <span class="input-hint">日本株の4桁証券コードを入力してください</span>
+                </div>
+            </form>
+        </section>
+
+        <div id="loading" class="loading hidden">
+            <div class="spinner"></div>
+            <p>データ取得・計算中...</p>
+        </div>
+
+        <div id="error-msg" class="error-msg hidden"></div>
+
+        <section id="results" class="results hidden">
+            <div class="company-header">
+                <h2 id="company-name"></h2>
+                <div class="company-meta">
+                    <span id="result-code" class="badge"></span>
+                    <span id="result-price" class="badge badge-price"></span>
+                </div>
+            </div>
+
+            <!-- Lynch Index Cards -->
+            <div class="index-cards" id="index-cards"></div>
+
+            <!-- Input Data Table -->
+            <div class="data-section">
+                <h3>計算に用いた数値</h3>
+                <div class="table-wrapper">
+                    <table class="data-table" id="input-data-table">
+                        <thead>
+                            <tr>
+                                <th>項目</th>
+                                <th>値</th>
+                                <th>データソース</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Calculation Process -->
+            <div class="data-section">
+                <h3>計算過程</h3>
+                <div id="calc-process"></div>
+            </div>
+
+            <!-- Evaluation Guide -->
+            <div class="data-section guide">
+                <h3>評価基準</h3>
+                <p>ピーター・リンチ指数 =（成長率 + 配当利回り）÷ PER</p>
+                <ul>
+                    <li><span class="eval-label eval-good">投資対象</span> 指数 ≥ 2.0</li>
+                    <li><span class="eval-label eval-fair">まずまず</span> 指数 ≥ 1.5</li>
+                    <li><span class="eval-label eval-poor">見込み薄</span> 指数 &lt; 1.5</li>
+                </ul>
+            </div>
+        </section>
+
+        <footer>
+            <p>本ツールは投資助言を目的とするものではありません。投資判断はご自身の責任でお願いします。</p>
+            <p class="footer-sources">データソース: Yahoo Finance / EDINET（金融庁）</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
