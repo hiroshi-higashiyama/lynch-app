@@ -1,6 +1,7 @@
-"""Yahoo Finance data fetcher for Japanese stocks using direct API calls."""
+"""Yahoo Finance data fetcher for Japanese stocks using crumb-based authentication."""
 
 import logging
+import threading
 
 import requests
 from bs4 import BeautifulSoup
@@ -8,15 +9,70 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger(__name__)
 
 YAHOO_FINANCE_QUERY_URL = (
-    "https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+    "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
 )
+
+# Module-level session cache for crumb authentication
+_session_lock = threading.Lock()
+_cached_session: requests.Session | None = None
+_cached_crumb: str | None = None
+
+
+def _get_authenticated_session() -> tuple[requests.Session, str]:
+    """Get an authenticated Yahoo Finance session with a valid crumb.
+
+    Yahoo Finance API requires a crumb token + session cookies for authentication.
+    This function fetches the cookies and crumb, caching them for reuse.
+    """
+    global _cached_session, _cached_crumb
+
+    with _session_lock:
+        if _cached_session is not None and _cached_crumb is not None:
+            return _cached_session, _cached_crumb
+
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        })
+
+        # Step 1: Visit fc.yahoo.com to get initial cookies
+        try:
+            session.get("https://fc.yahoo.com/", timeout=10, allow_redirects=True)
+        except requests.RequestException:
+            pass  # Cookie may still be set even on error
+
+        # Step 2: Get crumb using the session cookies
+        crumb_url = "https://query2.finance.yahoo.com/v1/test/getcrumb"
+        resp = session.get(crumb_url, timeout=10)
+        resp.raise_for_status()
+        crumb = resp.text.strip()
+
+        if not crumb:
+            raise ValueError("Failed to obtain Yahoo Finance crumb token")
+
+        _cached_session = session
+        _cached_crumb = crumb
+        logger.info("Yahoo Finance crumb authentication successful")
+        return session, crumb
+
+
+def _invalidate_session():
+    """Invalidate the cached session so the next call re-authenticates."""
+    global _cached_session, _cached_crumb
+    with _session_lock:
+        _cached_session = None
+        _cached_crumb = None
 
 
 def fetch_yahoo_data(stock_code: str) -> dict:
     """Fetch PER, dividend yield, and stock price from Yahoo Finance.
 
-    Tries the Yahoo Finance quoteSummary API first, falls back to scraping
-    the Japanese Yahoo Finance site.
+    Uses crumb-based authentication for the Yahoo Finance API.
+    Falls back to scraping the Japanese Yahoo Finance site on failure.
 
     Args:
         stock_code: 4-digit Japanese stock code (e.g. "7203").
@@ -34,67 +90,76 @@ def fetch_yahoo_data(stock_code: str) -> dict:
         "eps_ttm": None,
     }
 
-    try:
-        url = YAHOO_FINANCE_QUERY_URL.format(ticker=ticker_symbol)
-        params = {
-            "modules": "price,summaryDetail,defaultKeyStatistics,earnings",
-        }
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36"
-            ),
-        }
+    for attempt in range(2):
+        try:
+            session, crumb = _get_authenticated_session()
 
-        resp = requests.get(url, params=params, headers=headers, timeout=15)
+            url = YAHOO_FINANCE_QUERY_URL.format(ticker=ticker_symbol)
+            params = {
+                "modules": "price,summaryDetail,defaultKeyStatistics,earnings",
+                "crumb": crumb,
+            }
 
-        if resp.status_code != 200:
-            logger.warning(
-                "Yahoo Finance API returned %d for %s",
-                resp.status_code,
-                ticker_symbol,
+            resp = session.get(url, params=params, timeout=15)
+
+            if resp.status_code == 401 and attempt == 0:
+                # Crumb expired — invalidate and retry
+                logger.info("Crumb expired, re-authenticating...")
+                _invalidate_session()
+                continue
+
+            if resp.status_code != 200:
+                logger.warning(
+                    "Yahoo Finance API returned %d for %s",
+                    resp.status_code,
+                    ticker_symbol,
+                )
+                return _fallback_scrape(stock_code, result)
+
+            data = resp.json()
+            quote_summary = data.get("quoteSummary", {}).get("result", [])
+            if not quote_summary:
+                return _fallback_scrape(stock_code, result)
+
+            info = quote_summary[0]
+
+            # Price module
+            price_data = info.get("price", {})
+            result["company_name"] = price_data.get("longName") or price_data.get(
+                "shortName"
+            )
+            result["stock_price"] = _extract_raw(
+                price_data.get("regularMarketPrice")
+            )
+
+            # Summary detail module
+            summary = info.get("summaryDetail", {})
+            result["per"] = _extract_raw(summary.get("trailingPE"))
+            if result["per"] is None:
+                result["per"] = _extract_raw(summary.get("forwardPE"))
+
+            raw_yield = _extract_raw(summary.get("dividendYield"))
+            if raw_yield is not None:
+                result["dividend_yield"] = round(raw_yield * 100, 2)
+            else:
+                result["dividend_yield"] = 0.0
+
+            # Default key statistics for EPS
+            stats = info.get("defaultKeyStatistics", {})
+            result["eps_ttm"] = _extract_raw(stats.get("trailingEps"))
+
+            return result
+
+        except Exception:
+            if attempt == 0:
+                _invalidate_session()
+                continue
+            logger.exception(
+                "Failed to fetch Yahoo Finance data for %s", ticker_symbol
             )
             return _fallback_scrape(stock_code, result)
 
-        data = resp.json()
-        quote_summary = data.get("quoteSummary", {}).get("result", [])
-        if not quote_summary:
-            return _fallback_scrape(stock_code, result)
-
-        info = quote_summary[0]
-
-        # Price module
-        price_data = info.get("price", {})
-        result["company_name"] = price_data.get("longName") or price_data.get(
-            "shortName"
-        )
-        result["stock_price"] = _extract_raw(
-            price_data.get("regularMarketPrice")
-        )
-
-        # Summary detail module
-        summary = info.get("summaryDetail", {})
-        result["per"] = _extract_raw(summary.get("trailingPE"))
-        if result["per"] is None:
-            result["per"] = _extract_raw(summary.get("forwardPE"))
-
-        raw_yield = _extract_raw(summary.get("dividendYield"))
-        if raw_yield is not None:
-            result["dividend_yield"] = round(raw_yield * 100, 2)
-        else:
-            result["dividend_yield"] = 0.0
-
-        # Default key statistics for EPS
-        stats = info.get("defaultKeyStatistics", {})
-        result["eps_ttm"] = _extract_raw(stats.get("trailingEps"))
-
-    except Exception:
-        logger.exception(
-            "Failed to fetch Yahoo Finance data for %s", ticker_symbol
-        )
-        return _fallback_scrape(stock_code, result)
-
-    return result
+    return _fallback_scrape(stock_code, result)
 
 
 def _extract_raw(field) -> float | None:
