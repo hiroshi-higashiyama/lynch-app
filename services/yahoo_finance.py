@@ -12,6 +12,16 @@ YAHOO_FINANCE_QUERY_URL = (
     "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
 )
 
+# All modules we need for comprehensive data
+MODULES = ",".join([
+    "price",
+    "summaryDetail",
+    "defaultKeyStatistics",
+    "earnings",
+    "financialData",
+    "incomeStatementHistory",
+])
+
 # Module-level session cache for crumb authentication
 _session_lock = threading.Lock()
 _cached_session: requests.Session | None = None
@@ -19,11 +29,7 @@ _cached_crumb: str | None = None
 
 
 def _get_authenticated_session() -> tuple[requests.Session, str]:
-    """Get an authenticated Yahoo Finance session with a valid crumb.
-
-    Yahoo Finance API requires a crumb token + session cookies for authentication.
-    This function fetches the cookies and crumb, caching them for reuse.
-    """
+    """Get an authenticated Yahoo Finance session with a valid crumb."""
     global _cached_session, _cached_crumb
 
     with _session_lock:
@@ -69,17 +75,13 @@ def _invalidate_session():
 
 
 def fetch_yahoo_data(stock_code: str) -> dict:
-    """Fetch PER, dividend yield, and stock price from Yahoo Finance.
-
-    Uses crumb-based authentication for the Yahoo Finance API.
-    Falls back to scraping the Japanese Yahoo Finance site on failure.
+    """Fetch financial data from Yahoo Finance for a Japanese stock.
 
     Args:
         stock_code: 4-digit Japanese stock code (e.g. "7203").
 
     Returns:
-        Dict with keys: stock_price, per, dividend_yield, company_name, eps_ttm.
-        Values are None when unavailable.
+        Dict with stock data. Values are None when unavailable.
     """
     ticker_symbol = f"{stock_code}.T"
     result = {
@@ -90,7 +92,8 @@ def fetch_yahoo_data(stock_code: str) -> dict:
         "eps_ttm": None,
         "forward_eps": None,
         "earnings_growth": None,
-        "yearly_earnings": [],  # [{year, earnings}] sorted newest-first
+        "yearly_earnings": [],
+        "yearly_net_income": [],
     }
 
     for attempt in range(2):
@@ -98,15 +101,11 @@ def fetch_yahoo_data(stock_code: str) -> dict:
             session, crumb = _get_authenticated_session()
 
             url = YAHOO_FINANCE_QUERY_URL.format(ticker=ticker_symbol)
-            params = {
-                "modules": "price,summaryDetail,defaultKeyStatistics,earnings,financialData",
-                "crumb": crumb,
-            }
+            params = {"modules": MODULES, "crumb": crumb}
 
             resp = session.get(url, params=params, timeout=15)
 
             if resp.status_code == 401 and attempt == 0:
-                # Crumb expired — invalidate and retry
                 logger.info("Crumb expired, re-authenticating...")
                 _invalidate_session()
                 continue
@@ -126,7 +125,14 @@ def fetch_yahoo_data(stock_code: str) -> dict:
 
             info = quote_summary[0]
 
-            # Price module
+            # Log available modules for debugging
+            logger.info(
+                "Yahoo modules received for %s: %s",
+                ticker_symbol,
+                list(info.keys()),
+            )
+
+            # --- Price module ---
             price_data = info.get("price", {})
             result["company_name"] = price_data.get("longName") or price_data.get(
                 "shortName"
@@ -135,7 +141,7 @@ def fetch_yahoo_data(stock_code: str) -> dict:
                 price_data.get("regularMarketPrice")
             )
 
-            # Summary detail module
+            # --- Summary detail ---
             summary = info.get("summaryDetail", {})
             result["per"] = _extract_raw(summary.get("trailingPE"))
             if result["per"] is None:
@@ -147,18 +153,27 @@ def fetch_yahoo_data(stock_code: str) -> dict:
             else:
                 result["dividend_yield"] = 0.0
 
-            # Default key statistics for EPS
+            # --- Default key statistics ---
             stats = info.get("defaultKeyStatistics", {})
             result["eps_ttm"] = _extract_raw(stats.get("trailingEps"))
             result["forward_eps"] = _extract_raw(stats.get("forwardEps"))
 
-            # Financial data for earnings growth
-            fin_data = info.get("financialData", {})
-            raw_eg = _extract_raw(fin_data.get("earningsGrowth"))
-            if raw_eg is not None:
-                result["earnings_growth"] = round(raw_eg * 100, 2)
+            eq_growth = _extract_raw(stats.get("earningsQuarterlyGrowth"))
+            if eq_growth is not None:
+                result["earnings_growth"] = round(eq_growth * 100, 2)
 
-            # Yearly earnings from earnings module
+            # --- Financial data ---
+            fin_data = info.get("financialData", {})
+            if result["earnings_growth"] is None:
+                raw_eg = _extract_raw(fin_data.get("earningsGrowth"))
+                if raw_eg is not None:
+                    result["earnings_growth"] = round(raw_eg * 100, 2)
+
+            # Also try to get EPS from financialData currentPrice / PER
+            if result["eps_ttm"] is None and result["stock_price"] and result["per"]:
+                result["eps_ttm"] = round(result["stock_price"] / result["per"], 2)
+
+            # --- Earnings module: yearly chart ---
             earnings_mod = info.get("earnings", {})
             yearly_chart = earnings_mod.get("financialsChart", {}).get("yearly", [])
             yearly_list = []
@@ -169,6 +184,36 @@ def fetch_yahoo_data(stock_code: str) -> dict:
                     yearly_list.append({"year": year, "earnings": earn})
             yearly_list.sort(key=lambda x: x["year"], reverse=True)
             result["yearly_earnings"] = yearly_list
+
+            # --- Income statement history: annual net income ---
+            inc_hist = info.get("incomeStatementHistory", {})
+            statements = inc_hist.get("incomeStatementHistory", [])
+            ni_list = []
+            for stmt in statements:
+                end_date = stmt.get("endDate", {})
+                date_str = end_date.get("fmt") if isinstance(end_date, dict) else None
+                net_income = _extract_raw(stmt.get("netIncome"))
+                if net_income is not None:
+                    ni_list.append({
+                        "date": date_str or "unknown",
+                        "net_income": net_income,
+                    })
+            result["yearly_net_income"] = ni_list
+
+            logger.info(
+                "Yahoo data for %s: price=%s, per=%s, dy=%s, eps_ttm=%s, "
+                "forward_eps=%s, earnings_growth=%s, yearly_earnings=%d items, "
+                "yearly_net_income=%d items",
+                ticker_symbol,
+                result["stock_price"],
+                result["per"],
+                result["dividend_yield"],
+                result["eps_ttm"],
+                result["forward_eps"],
+                result["earnings_growth"],
+                len(result["yearly_earnings"]),
+                len(result["yearly_net_income"]),
+            )
 
             return result
 

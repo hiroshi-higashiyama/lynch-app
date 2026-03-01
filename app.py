@@ -65,39 +65,71 @@ def api_calculate():
         oi_forecast = edinet["ordinary_income_forecast"]
 
         edinet_source = edinet.get("data_source", "EDINET")
-        yahoo_used_for_eps = False
-        yahoo_used_for_oi = False
+        yahoo_fallback_used = False
 
-        # Fallback: use Yahoo Finance data when EDINET data is missing
-        yearly = yahoo.get("yearly_earnings", [])
+        # --- Fallback: use Yahoo Finance data when EDINET data is missing ---
+        yearly_earn = yahoo.get("yearly_earnings", [])
+        yearly_ni = yahoo.get("yearly_net_income", [])
 
+        # Strategy 1: EPS from Yahoo trailingEps / forwardEps
         if eps_current is None and yahoo.get("eps_ttm") is not None:
             eps_current = yahoo["eps_ttm"]
-            yahoo_used_for_eps = True
-
-        if eps_previous is None and yahoo.get("eps_ttm") is not None and yahoo.get("earnings_growth") is not None:
-            # Derive previous EPS from trailing EPS and growth rate
-            growth = yahoo["earnings_growth"] / 100
-            if growth != -1:
-                eps_previous = yahoo["eps_ttm"] / (1 + growth)
-                yahoo_used_for_eps = True
+            yahoo_fallback_used = True
 
         if eps_forecast is None and yahoo.get("forward_eps") is not None:
             eps_forecast = yahoo["forward_eps"]
-            yahoo_used_for_eps = True
+            yahoo_fallback_used = True
 
-        if oi_current is None and len(yearly) >= 1:
-            oi_current = yearly[0]["earnings"]
-            yahoo_used_for_oi = True
-        if oi_previous is None and len(yearly) >= 2:
-            oi_previous = yearly[1]["earnings"]
-            yahoo_used_for_oi = True
-        if oi_two_years_ago is None and len(yearly) >= 3:
-            oi_two_years_ago = yearly[2]["earnings"]
-            yahoo_used_for_oi = True
+        # Strategy 2: eps_previous from earnings_growth
+        if eps_previous is None and eps_current is not None and yahoo.get("earnings_growth") is not None:
+            growth = yahoo["earnings_growth"] / 100
+            if growth != -1:
+                eps_previous = round(eps_current / (1 + growth), 2)
+                yahoo_fallback_used = True
 
-        if yahoo_used_for_eps or yahoo_used_for_oi:
+        # Strategy 3: eps_previous from yearly net income + PER-derived shares
+        if eps_previous is None and eps_current is not None and len(yearly_ni) >= 2:
+            # Estimate shares outstanding from latest net income / EPS
+            latest_ni = yearly_ni[0]["net_income"]
+            if latest_ni and eps_current and eps_current != 0:
+                est_shares = latest_ni / eps_current
+                if est_shares > 0:
+                    prev_ni = yearly_ni[1]["net_income"]
+                    eps_previous = round(prev_ni / est_shares, 2)
+                    yahoo_fallback_used = True
+
+        # Strategy 4: ordinary income from yearly_earnings (financialsChart)
+        if oi_current is None and len(yearly_earn) >= 1:
+            oi_current = yearly_earn[0]["earnings"]
+            yahoo_fallback_used = True
+        if oi_previous is None and len(yearly_earn) >= 2:
+            oi_previous = yearly_earn[1]["earnings"]
+            yahoo_fallback_used = True
+        if oi_two_years_ago is None and len(yearly_earn) >= 3:
+            oi_two_years_ago = yearly_earn[2]["earnings"]
+            yahoo_fallback_used = True
+
+        # Strategy 5: ordinary income from incomeStatementHistory
+        if oi_current is None and len(yearly_ni) >= 1:
+            oi_current = yearly_ni[0]["net_income"]
+            yahoo_fallback_used = True
+        if oi_previous is None and len(yearly_ni) >= 2:
+            oi_previous = yearly_ni[1]["net_income"]
+            yahoo_fallback_used = True
+        if oi_two_years_ago is None and len(yearly_ni) >= 3:
+            oi_two_years_ago = yearly_ni[2]["net_income"]
+            yahoo_fallback_used = True
+
+        if yahoo_fallback_used:
             edinet_source = "Yahoo Finance (EDINET未設定のため代替)"
+
+        logger.info(
+            "Calc input for %s: eps_c=%s, eps_p=%s, eps_f=%s, "
+            "oi_c=%s, oi_p=%s, oi_2y=%s, per=%s, dy=%s",
+            stock_code, eps_current, eps_previous, eps_forecast,
+            oi_current, oi_previous, oi_two_years_ago,
+            yahoo["per"], yahoo["dividend_yield"],
+        )
 
         # Calculate indices
         results = calculate_lynch_indices(
@@ -127,6 +159,16 @@ def api_calculate():
     except Exception:
         logger.exception("Error calculating Lynch index for %s", stock_code)
         return jsonify({"error": "計算中にエラーが発生しました。しばらくしてから再度お試しください。"}), 500
+
+
+@app.route("/api/debug/<stock_code>")
+def api_debug(stock_code):
+    """Debug endpoint: show raw Yahoo Finance data (dev only)."""
+    code = _validate_stock_code(stock_code)
+    if code is None:
+        return jsonify({"error": "invalid code"}), 400
+    yahoo = fetch_yahoo_data(code)
+    return jsonify(yahoo)
 
 
 if __name__ == "__main__":
