@@ -98,26 +98,26 @@ def api_calculate():
                     eps_previous = round(prev_ni / est_shares, 2)
                     yahoo_fallback_used = True
 
-        # Strategy 4: ordinary income from yearly_earnings (financialsChart)
-        if oi_current is None and len(yearly_earn) >= 1:
-            oi_current = yearly_earn[0]["earnings"]
-            yahoo_fallback_used = True
-        if oi_previous is None and len(yearly_earn) >= 2:
-            oi_previous = yearly_earn[1]["earnings"]
-            yahoo_fallback_used = True
-        if oi_two_years_ago is None and len(yearly_earn) >= 3:
-            oi_two_years_ago = yearly_earn[2]["earnings"]
-            yahoo_fallback_used = True
-
-        # Strategy 5: ordinary income from incomeStatementHistory
-        if oi_current is None and len(yearly_ni) >= 1:
+        # Strategy 4: ordinary income from incomeStatementHistory (most reliable)
+        if not oi_current and len(yearly_ni) >= 1:
             oi_current = yearly_ni[0]["net_income"]
             yahoo_fallback_used = True
-        if oi_previous is None and len(yearly_ni) >= 2:
+        if not oi_previous and len(yearly_ni) >= 2:
             oi_previous = yearly_ni[1]["net_income"]
             yahoo_fallback_used = True
-        if oi_two_years_ago is None and len(yearly_ni) >= 3:
+        if not oi_two_years_ago and len(yearly_ni) >= 3:
             oi_two_years_ago = yearly_ni[2]["net_income"]
+            yahoo_fallback_used = True
+
+        # Strategy 5: ordinary income from yearly_earnings (financialsChart) fallback
+        if not oi_current and len(yearly_earn) >= 1 and yearly_earn[0]["earnings"]:
+            oi_current = yearly_earn[0]["earnings"]
+            yahoo_fallback_used = True
+        if not oi_previous and len(yearly_earn) >= 2 and yearly_earn[1]["earnings"]:
+            oi_previous = yearly_earn[1]["earnings"]
+            yahoo_fallback_used = True
+        if not oi_two_years_ago and len(yearly_earn) >= 3 and yearly_earn[2]["earnings"]:
+            oi_two_years_ago = yearly_earn[2]["earnings"]
             yahoo_fallback_used = True
 
         if yahoo_fallback_used:
