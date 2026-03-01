@@ -88,6 +88,9 @@ def fetch_yahoo_data(stock_code: str) -> dict:
         "dividend_yield": None,
         "company_name": None,
         "eps_ttm": None,
+        "forward_eps": None,
+        "earnings_growth": None,
+        "yearly_earnings": [],  # [{year, earnings}] sorted newest-first
     }
 
     for attempt in range(2):
@@ -96,7 +99,7 @@ def fetch_yahoo_data(stock_code: str) -> dict:
 
             url = YAHOO_FINANCE_QUERY_URL.format(ticker=ticker_symbol)
             params = {
-                "modules": "price,summaryDetail,defaultKeyStatistics,earnings",
+                "modules": "price,summaryDetail,defaultKeyStatistics,earnings,financialData",
                 "crumb": crumb,
             }
 
@@ -147,6 +150,25 @@ def fetch_yahoo_data(stock_code: str) -> dict:
             # Default key statistics for EPS
             stats = info.get("defaultKeyStatistics", {})
             result["eps_ttm"] = _extract_raw(stats.get("trailingEps"))
+            result["forward_eps"] = _extract_raw(stats.get("forwardEps"))
+
+            # Financial data for earnings growth
+            fin_data = info.get("financialData", {})
+            raw_eg = _extract_raw(fin_data.get("earningsGrowth"))
+            if raw_eg is not None:
+                result["earnings_growth"] = round(raw_eg * 100, 2)
+
+            # Yearly earnings from earnings module
+            earnings_mod = info.get("earnings", {})
+            yearly_chart = earnings_mod.get("financialsChart", {}).get("yearly", [])
+            yearly_list = []
+            for entry in yearly_chart:
+                year = entry.get("date")
+                earn = _extract_raw(entry.get("earnings"))
+                if year is not None and earn is not None:
+                    yearly_list.append({"year": year, "earnings": earn})
+            yearly_list.sort(key=lambda x: x["year"], reverse=True)
+            result["yearly_earnings"] = yearly_list
 
             return result
 
