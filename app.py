@@ -98,6 +98,12 @@ def api_calculate():
                     eps_previous = round(prev_ni / est_shares, 2)
                     yahoo_fallback_used = True
 
+        # Strategy 3b: eps_forecast from EPS growth trend when forward_eps unavailable
+        if eps_forecast is None and eps_current is not None and eps_previous is not None and eps_previous != 0:
+            eps_growth_rate = (eps_current - eps_previous) / abs(eps_previous)
+            eps_forecast = round(eps_current * (1 + eps_growth_rate), 2)
+            yahoo_fallback_used = True
+
         # Strategy 4: ordinary income from incomeStatementHistory (most reliable)
         if not oi_current and len(yearly_ni) >= 1:
             oi_current = yearly_ni[0]["net_income"]
@@ -118,6 +124,19 @@ def api_calculate():
             yahoo_fallback_used = True
         if not oi_two_years_ago and len(yearly_earn) >= 3 and yearly_earn[2]["earnings"]:
             oi_two_years_ago = yearly_earn[2]["earnings"]
+            yahoo_fallback_used = True
+
+        # Strategy 6: oi_forecast from forward_eps * estimated shares
+        if not oi_forecast and eps_forecast is not None and eps_current and oi_current:
+            est_shares = oi_current / eps_current
+            if est_shares > 0:
+                oi_forecast = round(eps_forecast * est_shares)
+                yahoo_fallback_used = True
+
+        # Strategy 6b: oi_forecast from income growth trend
+        if not oi_forecast and oi_current and oi_previous and oi_previous != 0:
+            oi_growth_rate = (oi_current - oi_previous) / abs(oi_previous)
+            oi_forecast = round(oi_current * (1 + oi_growth_rate))
             yahoo_fallback_used = True
 
         if yahoo_fallback_used:
